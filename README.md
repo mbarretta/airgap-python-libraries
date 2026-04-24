@@ -37,6 +37,9 @@ LOWSIDE                                    ONE-WAY DIODE         HIGHSIDE
   ```
   Only needed if requirements include packages without pre-built wheels (common
   in scientific stacks).
+- Optional: `pigz` (`sudo apt-get install -y pigz`) for multi-threaded gzip
+  compression of the transfer archive. `collect.sh` uses it automatically when
+  present; output is still plain `.tgz` and unpacks with `tar -xf` on the highside.
 
 **Highside machine**
 - Python 3 + pip
