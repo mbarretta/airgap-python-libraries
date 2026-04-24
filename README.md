@@ -9,7 +9,7 @@ files. No S3, no registry server, no extra tooling.
 
 ## How it works
 
-`libraries-list.sh` queries the Chainguard Libraries PEP 503 simple index to
+`enumerate.sh` queries the Chainguard Libraries PEP 503 simple index to
 produce a `requirements.txt` of every available package. `collect.sh` downloads
 the full transitive dependency tree into a flat `packages/` directory and
 archives it for transfer. `install.sh` extracts and installs on the highside
@@ -18,7 +18,7 @@ without any network access.
 ```
 LOWSIDE                                    ONE-WAY DIODE         HIGHSIDE
 ────────────────────────────────────────   ─────────────         ──────────────────
-./libraries-list.sh → requirements.txt                           pip install
+./enumerate.sh → requirements.txt                           pip install
 ./collect.sh requirements.txt                                      --no-index
   → packages/                             packages.tgz  ──►        --find-links packages/
 ```
@@ -76,7 +76,7 @@ To collect the full Chainguard Python catalog rather than a hand-curated list,
 generate `requirements.txt` automatically:
 
 ```bash
-./libraries-list.sh
+./enumerate.sh
 ```
 
 This queries the PEP 503 simple index at `libraries.cgr.dev/python/simple/`
@@ -173,7 +173,7 @@ want to pick up Chainguard's latest CVE-remediated versions. Only new or changed
 packages are fetched.
 
 ```bash
-./libraries-list.sh            # refresh the full catalog list (optional)
+./enumerate.sh            # refresh the full catalog list (optional)
 ./collect.sh requirements.txt
 # Transfer and install the new archive on the highside
 ```
