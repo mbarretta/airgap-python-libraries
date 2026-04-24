@@ -200,7 +200,7 @@ source .venv/bin/activate
 `pip install --find-links` resolves packages by filename from a local directory
 — no index server is needed on the highside. For environments that require a
 full PEP 503 index (Poetry, some CI tooling), see
-`chainguard-libraries-airgap-s3-verdaccio.md`.
+[`dir2pi`](https://github.com/wolever/pip2pi)
 
 ### Build failures
 
