@@ -49,6 +49,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
 REQUIREMENTS=""
 ARCHIVE_NAME="packages"
@@ -80,32 +81,9 @@ fi
 
 [[ -f "$REQUIREMENTS" ]] || { echo "ERROR: requirements file not found: ${REQUIREMENTS}" >&2; exit 1; }
 
-# Verify ~/.netrc has an entry for libraries.cgr.dev
-python3 - <<'PY'
-import netrc, sys
-try:
-    entry = netrc.netrc().authenticators("libraries.cgr.dev")
-except FileNotFoundError:
-    entry = None
-if not entry:
-    print("ERROR: no credentials for libraries.cgr.dev in ~/.netrc", file=sys.stderr)
-    print("", file=sys.stderr)
-    print("Add them with:", file=sys.stderr)
-    print("  chainctl auth pull-token create --repository=python --ttl=8760h", file=sys.stderr)
-    print("  # Then append to ~/.netrc:", file=sys.stderr)
-    print("  machine libraries.cgr.dev", file=sys.stderr)
-    print("  login    <username>", file=sys.stderr)
-    print("  password <password>", file=sys.stderr)
-    print("  chmod 600 ~/.netrc", file=sys.stderr)
-    sys.exit(1)
-PY
+verify_netrc
 
-PIP=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null || true)
-[[ -n "$PIP" ]] || {
-  echo "ERROR: pip / pip3 not found on PATH" >&2
-  echo "       Install with: sudo apt-get install -y python3-pip" >&2
-  exit 1
-}
+PIP=$(find_pip) || exit 1
 
 if [[ $FETCH_PROVENANCE -eq 1 ]]; then
   command -v curl >/dev/null || {
@@ -121,6 +99,16 @@ TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
 ARCHIVE="${SCRIPT_DIR}/${ARCHIVE_NAME}-${TIMESTAMP}.tgz"
 FAILURES_LOG="${SCRIPT_DIR}/${ARCHIVE_NAME}-${TIMESTAMP}.failures.txt"
 FAILURES=0
+
+ERR_TMP=$(mktemp)
+trap 'rm -f "$ERR_TMP"' EXIT
+
+read_requirements() {
+  awk '
+    { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "") }
+    NF && !/^#/ && !/^-/
+  ' "$1"
+}
 
 echo "=== collect.sh — ${TIMESTAMP} ==="
 echo "Requirements  : ${REQUIREMENTS}"
@@ -143,19 +131,16 @@ if [[ -n "$EXTRA_VERSIONS" ]]; then
     EXTRA_MISS=0
     echo "  Python ${ver} ..."
     while IFS= read -r line; do
-      line="${line#"${line%%[![:space:]]*}"}"
-      line="${line%"${line##*[![:space:]]}"}"
-      [[ -z "$line" || "$line" == \#* || "$line" == -* ]] && continue
       "$PIP" download \
-        --index-url https://libraries.cgr.dev/python/simple/ \
+        --index-url "$CG_PYTHON_INDEX" \
         --only-binary :all: \
         --python-version "$ver" \
         --implementation cp \
         --abi "$abi" \
         --dest "$PACKAGES_DIR" \
         "$line" \
-        2>/dev/null || { EXTRA_MISS=$(( EXTRA_MISS + 1 )); true; }
-    done < "$REQUIREMENTS"
+        2>/dev/null || EXTRA_MISS=$(( EXTRA_MISS + 1 ))
+    done < <(read_requirements "$REQUIREMENTS")
     [[ $EXTRA_MISS -gt 0 ]] && echo "    (${EXTRA_MISS} package(s) have no wheel for Python ${ver} — skipped)"
   done
   echo ""
@@ -167,32 +152,22 @@ echo "Downloading packages ..."
 # Download each requirement line individually so a single build failure
 # does not abort the rest of the collection.
 while IFS= read -r line; do
-  # Strip leading/trailing whitespace
-  line="${line#"${line%%[![:space:]]*}"}"
-  line="${line%"${line##*[![:space:]]}"}"
-
-  # Skip blank lines, comments, and pip option flags (-r, -c, --index-url, etc.)
-  [[ -z "$line" || "$line" == \#* || "$line" == -* ]] && continue
-
   if "$PIP" download \
-      --index-url https://libraries.cgr.dev/python/simple/ \
+      --index-url "$CG_PYTHON_INDEX" \
       --prefer-binary \
       --dest "$PACKAGES_DIR" \
       "$line" \
-      2>/tmp/pip-collect-err.txt; then
-    : # success — pip already printed progress
-  else
-    echo "  [FAIL] ${line}"
-    echo "$line" >> "$FAILURES_LOG"
-    # Append the first error line for context
-    grep -m1 'error:\|ValueError:\|ERROR' /tmp/pip-collect-err.txt 2>/dev/null \
-      | sed 's/^/         /' || true
-    FAILURES=$(( FAILURES + 1 ))
+      2>"$ERR_TMP"; then
+    continue
   fi
-done < "$REQUIREMENTS"
+  echo "  [FAIL] ${line}"
+  echo "$line" >> "$FAILURES_LOG"
+  grep -m1 'error:\|ValueError:\|ERROR' "$ERR_TMP" 2>/dev/null \
+    | sed 's/^/         /' || true
+  FAILURES=$(( FAILURES + 1 ))
+done < <(read_requirements "$REQUIREMENTS")
 
-PKG_COUNT=$(find "$PACKAGES_DIR" -maxdepth 1 -type f \
-  \( -name "*.whl" -o -name "*.tar.gz" -o -name "*.zip" \) | wc -l)
+PKG_COUNT=$(find_packages "$PACKAGES_DIR" | wc -l)
 
 echo ""
 echo "Packages downloaded : ${PKG_COUNT}"
@@ -206,7 +181,7 @@ if [[ $PKG_COUNT -eq 0 ]]; then
 fi
 
 # ── Phase 3: PEP 740 provenance sidecars ─────────────────────────────────────
-# URL pattern: libraries.cgr.dev/python/integrity/<pkg>/<version>/<file>/provenance
+# URL pattern: ${CG_PYTHON_INTEGRITY}/<pkg>/<version>/<file>/provenance
 # Credentials are read from ~/.netrc by curl --netrc.
 # Already-present sidecars are counted as OK and skipped.
 if [[ $FETCH_PROVENANCE -eq 1 ]]; then
@@ -215,8 +190,6 @@ if [[ $FETCH_PROVENANCE -eq 1 ]]; then
   ATTEST_OK=0
   ATTEST_MISS=0
 
-  # Parse package name and version from a wheel or sdist filename.
-  # Sets global PKG and VER; returns 1 if unparseable.
   parse_pkg_version() {
     local fn="$1"
     local base="${fn%.whl}"
@@ -236,6 +209,9 @@ if [[ $FETCH_PROVENANCE -eq 1 ]]; then
     return 1
   }
 
+  CURL_CONFIG=$(mktemp)
+  NEW_DESTS=()
+
   while IFS= read -r dist; do
     fn=$(basename "$dist")
     dest="${dist}.provenance"
@@ -250,20 +226,30 @@ if [[ $FETCH_PROVENANCE -eq 1 ]]; then
       continue
     fi
 
-    url="https://libraries.cgr.dev/python/integrity/${PKG}/${VER}/${fn}/provenance"
-    http_code=$(curl --netrc --silent \
-      --output "$dest" \
-      --write-out "%{http_code}" \
-      "$url" 2>/dev/null || echo "000")
+    printf 'url = "%s"\noutput = "%s"\n' \
+      "${CG_PYTHON_INTEGRITY}/${PKG}/${VER}/${fn}/provenance" \
+      "$dest" \
+      >> "$CURL_CONFIG"
+    NEW_DESTS+=("$dest")
+  done < <(find_packages "$PACKAGES_DIR" | sort)
 
-    if [[ "$http_code" == "200" ]]; then
-      ATTEST_OK=$(( ATTEST_OK + 1 ))
-    else
-      rm -f "$dest"
-      ATTEST_MISS=$(( ATTEST_MISS + 1 ))
-    fi
-  done < <(find "$PACKAGES_DIR" -maxdepth 1 -type f \
-             \( -name "*.whl" -o -name "*.tar.gz" -o -name "*.zip" \) | sort)
+  if [[ ${#NEW_DESTS[@]} -gt 0 ]]; then
+    # --parallel fans out across URLs; zero-byte outputs (404s and transport
+    # errors) are deleted below and counted as missing.
+    curl --netrc --silent --parallel --parallel-max 8 --config "$CURL_CONFIG" \
+      2>/dev/null || true
+
+    for dest in "${NEW_DESTS[@]}"; do
+      if [[ -s "$dest" ]]; then
+        ATTEST_OK=$(( ATTEST_OK + 1 ))
+      else
+        rm -f "$dest"
+        ATTEST_MISS=$(( ATTEST_MISS + 1 ))
+      fi
+    done
+  fi
+
+  rm -f "$CURL_CONFIG"
 
   echo "Provenance OK     : ${ATTEST_OK}"
   echo "Provenance missing: ${ATTEST_MISS} (expected for some upstream packages)"
@@ -271,7 +257,12 @@ fi
 
 echo ""
 echo "Creating archive ..."
-tar -czf "$ARCHIVE" -C "$(dirname "$PACKAGES_DIR")" "$(basename "$PACKAGES_DIR")"
+if command -v pigz >/dev/null 2>&1; then
+  tar --use-compress-program=pigz -cf "$ARCHIVE" \
+    -C "$(dirname "$PACKAGES_DIR")" "$(basename "$PACKAGES_DIR")"
+else
+  tar -czf "$ARCHIVE" -C "$(dirname "$PACKAGES_DIR")" "$(basename "$PACKAGES_DIR")"
+fi
 
 CHECKSUM_FILE="${ARCHIVE}.sha256"
 sha256sum "$ARCHIVE" > "$CHECKSUM_FILE"

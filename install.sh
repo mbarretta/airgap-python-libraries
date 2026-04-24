@@ -17,6 +17,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
 ARCHIVE="${1:-}"
 REQUIREMENTS="${2:-}"
@@ -29,7 +30,7 @@ fi
 [[ -f "$ARCHIVE" ]]      || { echo "ERROR: archive not found: ${ARCHIVE}" >&2; exit 1; }
 [[ -f "$REQUIREMENTS" ]] || { echo "ERROR: requirements file not found: ${REQUIREMENTS}" >&2; exit 1; }
 
-command -v pip >/dev/null 2>&1 || { echo "ERROR: pip not found on PATH" >&2; exit 1; }
+PIP=$(find_pip) || exit 1
 
 echo "=== install.sh ==="
 echo "Archive      : ${ARCHIVE}"
@@ -55,12 +56,12 @@ PACKAGES_DIR="${SCRIPT_DIR}/packages"
   exit 1
 }
 
-PKG_COUNT=$(find "$PACKAGES_DIR" -maxdepth 1 -type f \( -name "*.whl" -o -name "*.tar.gz" -o -name "*.zip" \) | wc -l)
+PKG_COUNT=$(find_packages "$PACKAGES_DIR" | wc -l)
 echo "Packages available: ${PKG_COUNT}"
 echo ""
 
 echo "Installing from local packages ..."
-pip install \
+"$PIP" install \
   --no-index \
   --find-links "$PACKAGES_DIR" \
   --requirement "$REQUIREMENTS"
